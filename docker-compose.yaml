@@ -29,6 +29,21 @@ services:
     depends_on:
       - redis
 
+  app3:  
+    build: ./app
+    container_name: app3
+    ports:
+      - 3003:8080
+    environment:
+      - SERVER_PORT=8080
+      - SERVER_HOST=0.0.0.0
+      - SERVER_NUMBER=3
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WEATHER_API_URL=https://api.open-meteo.com/v1/forecast
+    depends_on:
+      - redis
+
   redis:
     image: redis:alpine
     container_name: redis
@@ -45,3 +60,4 @@ services:
     depends_on:
       - app1
       - app2
+      - app3  
