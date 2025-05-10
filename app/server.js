@@ -2,42 +2,60 @@ const express = require('express');
 const { createClient } = require('redis');
 const axios = require('axios');
 
-const serverPort = process.env.SERVER_PORT;
-const serverHost = process.env.SERVER_HOST;
+const serverPort = process.env.SERVER_PORT || 3000;
+const serverHost = process.env.SERVER_HOST || '0.0.0.0';
 
-const serverNumber = process.env.SERVER_NUMBER;
+const serverNumber = process.env.SERVER_NUMBER || '1';
 const weatherApiUrl = process.env.WEATHER_API_URL;
 
 const redisHost = process.env.REDIS_HOST;
 const redisPort = process.env.REDIS_PORT;
 
 const app = express();
-const redisClient = createClient({
-  socket: {
-    host: redisHost,
-    port: redisPort,
-  },
-});
-
 app.set('view engine', 'pug');
+
+let redisClient;
+let redisAvailable = false;
+
+// Try to connect to Redis
+async function initRedis() {
+  try {
+    redisClient = createClient({
+      socket: {
+        host: redisHost,
+        port: redisPort,
+      },
+    });
+    await redisClient.connect();
+    console.log('✅ Connected to Redis');
+    redisAvailable = true;
+  } catch (error) {
+    console.warn('⚠️ Redis not available, proceeding without cache');
+    redisAvailable = false;
+  }
+}
 
 app.get('/', async (req, res) => {
   const cacheKey = `server${serverNumber}:weatherData`;
-  const cachedWeatherData = await redisClient.get(cacheKey);
 
-  if (cachedWeatherData) {
-    console.log('Serving weather from cache');
+  let temperature;
 
-    const weatherData = JSON.parse(cachedWeatherData);
-    const temperature = weatherData.current.temperature_2m;
-
-    res.render('index', { serverNumber, temperature });
-
-    return;
+  if (redisAvailable) {
+    try {
+      const cached = await redisClient.get(cacheKey);
+      if (cached) {
+        console.log('✅ Serving weather from Redis cache');
+        const weatherData = JSON.parse(cached);
+        temperature = weatherData.current.temperature_2m;
+        return res.render('index', { serverNumber, temperature });
+      }
+    } catch (err) {
+      console.warn('❌ Failed to get from Redis:', err.message);
+    }
   }
 
-  console.log('Serving weather from API');
-
+  // Fetch from API
+  console.log('🌐 Serving weather from API');
   const response = await axios.get(weatherApiUrl, {
     params: {
       latitude: 30.0626,
@@ -48,41 +66,37 @@ app.get('/', async (req, res) => {
   });
 
   const weatherData = response.data;
-  const temperature = weatherData.current.temperature_2m;
+  temperature = weatherData.current.temperature_2m;
 
-  await redisClient.setEx(cacheKey, 600, JSON.stringify(weatherData)); // 600 seconds = 10 minutes
+  if (redisAvailable) {
+    try {
+      await redisClient.setEx(cacheKey, 600, JSON.stringify(weatherData));
+    } catch (err) {
+      console.warn('❌ Failed to cache in Redis:', err.message);
+    }
+  }
 
   res.render('index', { serverNumber, temperature });
 });
 
 async function main() {
-  try {
-    await redisClient.connect();
-    console.log('Connected to Redis');
+  await initRedis();
 
-    const server = app.listen(serverPort, serverHost, () => {
-      console.log(`Listening at http://${serverHost}:${serverPort}`);
+  const server = app.listen(serverPort, serverHost, () => {
+    console.log(`🚀 Listening at http://${serverHost}:${serverPort}`);
+  });
+
+  const shutdownHandler = async () => {
+    console.log('🛑 Shutting down gracefully...');
+    if (redisAvailable) await redisClient.disconnect();
+    server.close(() => {
+      console.log('✅ HTTP server closed');
+      process.exit(0);
     });
+  };
 
-    const shutdownHandler = async () => {
-      console.log('Shutting down gracefully...');
-
-      await redisClient.disconnect();
-
-      server.close(() => {
-        console.log('HTTP server closed');
-
-        process.exit(0);
-      });
-    };
-
-    process.on('SIGINT', shutdownHandler);
-    process.on('SIGTERM', shutdownHandler);
-  } catch (err) {
-    console.error('Failed to start server:', err);
-
-    process.exit(1);
-  }
+  process.on('SIGINT', shutdownHandler);
+  process.on('SIGTERM', shutdownHandler);
 }
 
 main();
